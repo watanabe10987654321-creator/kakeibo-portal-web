@@ -43,7 +43,7 @@
   <label>PIN（4〜8桁の数字。初回はここで決める）
     <input id="pin" type="password" inputmode="numeric" pattern="\d{4,8}" autocomplete="off" required>
   </label>
-  <button>ログイン</button>
+  <button id="loginBtn">ログイン</button>
 </form>
 
 <nav id="nav" hidden>
@@ -203,11 +203,21 @@ async function start() {
 $('loginView').onsubmit = async ev => {
   ev.preventDefault();
   $('msg').textContent = '';
+  // 押したことが分かるように、確認中はボタンを止めて文言を変える
+  $('loginBtn').disabled = true;
+  $('loginBtn').textContent = '確認中…';
   try {
     token = await run('login', params.m, params.e, params.s, $('pin').value);
     disk.set('token', token);
-    start();
-  } catch (e) { $('msg').textContent = e.message; }
+    $('loginBtn').textContent = 'ログインしました。開いています…';
+    await start();
+  } catch (e) {
+    $('msg').textContent = e.message;
+    $('pin').value = '';
+    $('pin').focus();
+  }
+  $('loginBtn').disabled = false;
+  $('loginBtn').textContent = 'ログイン';
 };
 
 $('nav').onclick = ev => { if (ev.target.dataset.view) show(ev.target.dataset.view); };

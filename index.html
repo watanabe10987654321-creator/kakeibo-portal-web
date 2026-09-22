@@ -27,6 +27,12 @@
   .card summary { cursor: pointer; }
   .card img { max-width: 100%; margin-top: 8px; }
   .card button { font-size: 14px; padding: 8px; margin-top: 8px; background: #eee; color: #222; }
+  .edit input, .edit select { font-size: 16px; padding: 8px; margin-top: 2px; }
+  .edit .item { display: grid; grid-template-columns: 1fr 88px; gap: 4px; border-top: 1px dashed #ddd; padding-top: 6px; margin-top: 6px; }
+  .edit .item select { grid-column: 1 / -1; }
+  .edit .item label { margin: 0; font-size: 13px; }
+  .edit .primary { background: #1a73e8; color: #fff; }
+  .edit .danger { color: #c00; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -372,7 +378,91 @@ function detail(r) {
     };
     d.append(b);
   }
+  const e = el('button', '直す');
+  e.type = 'button';
+  e.onclick = () => { e.hidden = true; d.append(editForm(r, () => { e.hidden = false; })); };
+  d.append(e);
   return d;
+}
+
+// ---------- 編集（P3）。画面を先に書き換え、裏で保存。失敗したら元に戻す ----------
+
+function sel(options, value) {
+  const x = el('select');
+  x.replaceChildren(...options.map(o => new Option(o, o)));
+  if (options.indexOf(value) < 0 && value) x.append(new Option(value, value));
+  x.value = value;
+  return x;
+}
+
+function field(label, input) {
+  const l = el('label', label);
+  l.append(input);
+  return l;
+}
+
+function editForm(r, onClose) {
+  const b = disk.get('boot') || { forWhom: ['その他'], categories: ['その他'] };
+  const f = el('form', null, 'edit');
+  const store = el('input'); store.value = r.store; store.maxLength = 50;
+  const date = el('input'); date.type = 'date'; date.value = r.date; date.required = true;
+  const total = el('input'); total.type = 'number'; total.inputMode = 'numeric'; total.value = r.total == null ? '' : r.total;
+  const whom = sel(b.forWhom, b.forWhom.indexOf(r.for_whom) >= 0 ? r.for_whom : 'その他');
+  const whomOther = el('input'); whomOther.maxLength = 30; whomOther.placeholder = '名前'; whomOther.value = b.forWhom.indexOf(r.for_whom) >= 0 ? '' : r.for_whom;
+  whomOther.hidden = whom.value !== 'その他';
+  whom.onchange = () => { whomOther.hidden = whom.value !== 'その他'; };
+  const memo = el('input'); memo.value = r.memo; memo.maxLength = 200;
+  f.append(field('店名', store), field('日付', date), field('合計', total), field('だれのため', whom), whomOther, field('メモ', memo), el('h2', '品目'));
+
+  const items = el('div');
+  const itemRow = it => {
+    const row = el('div', null, 'item');
+    const name = el('input'); name.value = it.name; name.maxLength = 50; name.placeholder = '品名';
+    const amount = el('input'); amount.type = 'number'; amount.inputMode = 'numeric'; amount.value = it.amount;
+    const cat = sel(b.categories, it.category);
+    const del = el('input'); del.type = 'checkbox';
+    const delLabel = el('label', ' 消す'); delLabel.prepend(del);
+    row.append(name, amount, cat, delLabel);
+    row.read = () => ({ item_id: it.item_id || '', name: name.value, amount: amount.value, category: cat.value, deleted: del.checked });
+    return row;
+  };
+  r.items.forEach(it => items.append(itemRow(it)));
+  const add = el('button', '品目を追加'); add.type = 'button';
+  add.onclick = () => items.append(itemRow({ item_id: '', name: '', amount: '', category: b.categories[0] }));
+  const save = el('button', '保存', 'primary');
+  const cancel = el('button', 'やめる'); cancel.type = 'button';
+  const remove = el('button', 'このレシートを削除', 'danger'); remove.type = 'button';
+  f.append(items, add, save, cancel, remove);
+  cancel.onclick = () => { f.remove(); onClose(); };
+
+  const apply = async patch => {
+    const m = months[ym];
+    const old = m.receipts.slice();
+    const i = m.receipts.findIndex(x => x.receipt_id === r.receipt_id);
+    const guess = patch.deleted ? null : Object.assign({}, r, {
+      store: patch.store, date: patch.date, total: patch.total === '' ? null : Number(patch.total), for_whom: patch.for_whom === 'その他' ? patch.for_whom_other : patch.for_whom,
+      memo: patch.memo, status: 'ok', items: patch.items.filter(it => !it.deleted).map(it => ({ name: it.name, amount: Number(it.amount), category: it.category, for_whom: r.for_whom })),
+    });
+    if (guess && guess.date.slice(0, 7) !== ym) guess.__moved = true;
+    m.receipts = guess && !guess.__moved ? m.receipts.map(x => (x.receipt_id === r.receipt_id ? guess : x)) : m.receipts.filter(x => x.receipt_id !== r.receipt_id);
+    setMonth(m);
+    if (guess && guess.__moved) delete months[guess.date.slice(0, 7)];
+    try {
+      const fresh = await run('saveReceipt', token, patch);
+      if (fresh && fresh.date.slice(0, 7) === ym) { m.receipts = m.receipts.map(x => (x.receipt_id === r.receipt_id ? fresh : x)); setMonth(m); }
+    } catch (e) {
+      m.receipts = old;
+      setMonth(m);
+      fail(e);
+    }
+  };
+  f.onsubmit = ev => {
+    ev.preventDefault();
+    apply({ receipt_id: r.receipt_id, store: store.value, date: date.value, total: total.value, for_whom: whom.value, for_whom_other: whomOther.value, memo: memo.value,
+      items: [...items.children].map(row => row.read()) });
+  };
+  remove.onclick = () => { if (confirm('このレシートを削除しますか？')) apply({ receipt_id: r.receipt_id, deleted: true }); };
+  return f;
 }
 
 params = Object.fromEntries(new URLSearchParams(location.search));

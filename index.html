@@ -157,11 +157,14 @@ function setMonth(data) {
 
 // 前回のデータがあれば先に画面を出し、サーバーの確認は裏で行う
 async function start() {
-  if (!token) return needLogin();
   const last = disk.get('boot');
+  // 別の人の URL で開いたら、端末に残っている前の人のログインは捨てる（家族で端末を共有するとき）
+  if (params.m && last && last.member_id && last.member_id !== params.m) return needLogin();
+  if (!token) return needLogin();
   if (last) { applyBoot(last); show('post'); }
   try {
     const b = await run('getBootstrap', token, ym);
+    if (params.m && b.member_id !== params.m) return needLogin();
     setMonth(b.month);
     delete b.month;
     disk.set('boot', b);

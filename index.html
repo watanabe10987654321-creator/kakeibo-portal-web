@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>家計簿ポータル</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 16px; max-width: 480px; color: #222; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 15px; margin: 20px 0 4px; color: #555; }
+  label { display: block; margin-top: 16px; font-size: 14px; color: #555; }
+  input, select, button { font-size: 18px; width: 100%; box-sizing: border-box; padding: 12px; margin-top: 4px; }
+  input[type=checkbox] { width: auto; }
+  button { margin-top: 24px; background: #1a73e8; color: #fff; border: 0; border-radius: 8px; }
+  button:disabled { background: #999; }
+  nav, .month { display: flex; gap: 8px; align-items: center; }
+  nav button, .month button { margin-top: 0; background: #eee; color: #222; font-size: 16px; }
+  nav button.on { background: #1a73e8; color: #fff; }
+  .month button { width: 56px; }
+  .month b { flex: 1; text-align: center; font-size: 18px; }
+  .total { font-size: 32px; font-weight: bold; margin-top: 12px; }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #eee; }
+  #msg { margin-top: 16px; color: #c00; white-space: pre-wrap; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  .warn { border-color: #e8a01a; background: #fff8e8; }
+  .card small { color: #555; display: block; }
+  .card summary { cursor: pointer; }
+  .card img { max-width: 100%; margin-top: 8px; }
+  .card button { font-size: 14px; padding: 8px; margin-top: 8px; background: #eee; color: #222; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>家計簿ポータル <small id="who"></small></h1>
+
+<form id="loginView" hidden>
+  <label>PIN（4〜8桁の数字。初回はここで決める）
+    <input id="pin" type="password" inputmode="numeric" pattern="\d{4,8}" autocomplete="off" required>
+  </label>
+  <button>ログイン</button>
+</form>
+
+<nav id="nav" hidden>
+  <button data-view="post">送る</button>
+  <button data-view="home">ホーム</button>
+  <button data-view="list">明細</button>
+</nav>
+
+<form id="postView" hidden>
+  <label>レシートの写真（最大10枚）
+    <input id="files" type="file" accept="image/*" multiple>
+  </label>
+  <label>だれのため
+    <select id="forWhom"></select>
+    <input id="forWhomOther" maxlength="30" placeholder="名前を入力" hidden>
+  </label>
+  <label>金額（レシートが無いとき。写真が1枚以下のときだけ使う）
+    <input id="amount" type="number" inputmode="numeric" min="0">
+  </label>
+  <label>メモ
+    <input id="memo" maxlength="200">
+  </label>
+  <button id="send">送る</button>
+  <div id="results"></div>
+</form>
+
+<div id="monthBar" class="month" hidden>
+  <button id="prevM">‹</button><b id="ymLabel"></b><button id="nextM">›</button>
+</div>
+
+<div id="homeView" hidden></div>
+
+<div id="listView" hidden>
+  <label>しぼりこみ
+    <select id="fWhom"></select>
+    <select id="fCat"></select>
+    <input id="fText" placeholder="店名・品名・メモ">
+  </label>
+  <label><input id="fNeeds" type="checkbox"> 要確認だけ</label>
+  <div id="listBody"></div>
+</div>
+
+<div id="msg"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const el = (tag, text, cls) => {
+  const e = document.createElement(tag);
+  if (text != null) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+};
+const yen = n => (n == null ? '金額不明' : Number(n).toLocaleString() + '円');
+// 端末への保存。使えない環境（プライベートブラウズ等）では黙って何もしない
+const disk = {
+  get(k) {
+    let v = null;
+    try { v = localStorage.getItem('kp_' + k); return JSON.parse(v); } catch (e) { return v; }  // 旧形式（生の文字列）のトークンも読む
+  },
+  set(k, v) { try { localStorage.setItem('kp_' + k, JSON.stringify(v)); } catch (e) {} },
+  clear() { try { Object.keys(localStorage).filter(k => k.indexOf('kp_') === 0).forEach(k => localStorage.removeItem(k)); } catch (e) {} },
+};
+let token = disk.get('token');
+let params = {};
+let view = 'post';
+let ym = new Date().toLocaleDateString('sv').slice(0, 7);
+const months = {};  // ym → getMonth の結果。端末にも保存し、開いた瞬間は前回分を出してから裏で最新に差し替える
+
+// GAS はデータの受け渡しだけ（K027）。Content-Type を付けないので、ブラウザのアカウント情報が付かず、事前確認（preflight）も要らない
+const API = 'https://script.google.com/macros/s/AKfycbxnMOTrxYHRmhdHUSQHznL-L5cSMQM-4hLnWETNQvZqpEa-3Yu13DdcgtIGxzvaDNs/exec';
+async function run(fn, ...args) {
+  const res = await fetch(API, { method: 'POST', body: JSON.stringify({ fn: fn, args: args }) });
+  const j = await res.json();
+  if (j.error) throw new Error(j.error);
+  return j.result;
+}
+
+function fail(e) {
+  if (String(e.message).indexOf('AUTH') >= 0) needLogin();
+  else $('msg').textContent = e.message;
+}
+
+function show(v) {
+  view = v;
+  $('loginView').hidden = v !== 'login';
+  $('nav').hidden = v === 'login' || v === '';
+  $('postView').hidden = v !== 'post';
+  $('homeView').hidden = v !== 'home';
+  $('listView').hidden = v !== 'list';
+  $('monthBar').hidden = v !== 'home' && v !== 'list';
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
+  $('msg').textContent = '';
+  if (v === 'home' || v === 'list') loadMonth();
+}
+
+function needLogin() {
+  token = null;
+  disk.clear();
+  if (params.m) show('login');
+  else { show(''); $('msg').textContent = 'メールで届いたログインURLから開いてください。'; }
+}
+
+function applyBoot(b) {
+  $('who').textContent = b.name + ' さん';
+  const keep = $('forWhom').value;
+  $('forWhom').replaceChildren(...b.forWhom.map(n => new Option(n, n)));
+  if (keep) $('forWhom').value = keep;
+  $('forWhomOther').hidden = $('forWhom').value !== 'その他';
+}
+$('forWhom').onchange = () => { $('forWhomOther').hidden = $('forWhom').value !== 'その他'; };
+
+function setMonth(data) {
+  months[data.ym] = data;
+  disk.set('month_' + data.ym, data);
+  if (data.ym === ym && (view === 'home' || view === 'list')) { renderHome(data); fillFilters(data); renderList(); }
+}
+
+// 前回のデータがあれば先に画面を出し、サーバーの確認は裏で行う
+async function start() {
+  if (!token) return needLogin();
+  const last = disk.get('boot');
+  if (last) { applyBoot(last); show('post'); }
+  try {
+    const b = await run('getBootstrap', token, ym);
+    setMonth(b.month);
+    delete b.month;
+    disk.set('boot', b);
+    applyBoot(b);
+    if (!last) show('post');
+  } catch (e) { needLogin(); }
+}
+
+$('loginView').onsubmit = async ev => {
+  ev.preventDefault();
+  $('msg').textContent = '';
+  try {
+    token = await run('login', params.m, params.e, params.s, $('pin').value);
+    disk.set('token', token);
+    start();
+  } catch (e) { $('msg').textContent = e.message; }
+};
+
+$('nav').onclick = ev => { if (ev.target.dataset.view) show(ev.target.dataset.view); };
+
+// ---------- 送る ----------
+
+// 長辺 1600px の JPEG に縮小して base64 を返す（通信量と Gemini のトークンを抑える）
+async function shrink(file) {
+  const img = await createImageBitmap(file);
+  const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * k);
+  c.height = Math.round(img.height * k);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.8).split(',')[1];
+}
+
+const FLAG = { ok: '', needs_review: '【要確認】', needs_input: '【手入力が必要】' };
+
+function itemLines(r) {
+  return r.items.map(it => el('small', '・' + it.name + '　' + yen(it.amount) + '（' + it.category + '）'));
+}
+
+function card(r) {
+  const d = el('div', null, 'card' + (r.status === 'ok' ? '' : ' warn'));
+  d.append(el('b', FLAG[r.status] + (r.store || '店名不明') + '　' + yen(r.total)), el('small', r.receipt_id + '　' + r.date), ...itemLines(r));
+  return d;
+}
+
+$('postView').onsubmit = async ev => {
+  ev.preventDefault();
+  const files = [...$('files').files].slice(0, 10);
+  const amount = files.length <= 1 ? $('amount').value : '';
+  if (!files.length && amount === '') { $('msg').textContent = '写真か金額のどちらかを入れてください。'; return; }
+  $('send').disabled = true;
+  $('results').replaceChildren();
+  const ids = [];
+  if ($('forWhom').value === 'その他' && !$('forWhomOther').value.trim()) { $('msg').textContent = '「その他」の名前を入れてください。'; return; }
+  const base = { for_whom: $('forWhom').value, for_whom_other: $('forWhomOther').value, amount: amount, memo: $('memo').value };
+  const jobs = files.length ? files : [null];
+  let done = 0;
+  const errors = [];
+  const progress = () => { $('msg').textContent = '送信中… ' + done + '/' + jobs.length + '（AI が読み取り中。1枚 10〜20秒）'; };
+  progress();
+  // ponytail: 同時3本。GAS 側の上限（同時実行30）には遠い
+  const worker = async () => {
+    while (jobs.length) {
+      const f = jobs.shift();
+      try {
+        const r = await run('postReceipt', token, Object.assign({}, base, f ? { image: await shrink(f) } : {}));
+        ids.push(r.receipt_id);
+        $('results').append(card(r));
+        const m = months[r.date.slice(0, 7)] || disk.get('month_' + r.date.slice(0, 7));
+        if (m) { m.receipts.push(r); setMonth(m); }
+      } catch (e) { errors.push(e); }
+      done++;
+      progress();
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  $('msg').textContent = '';
+  if (errors.some(e => String(e.message).indexOf('AUTH') >= 0)) needLogin();
+  else if (errors.length) $('msg').textContent = errors.length + '件を送れませんでした：' + errors[0].message;
+  else $('postView').reset();
+  if (ids.length) run('finishPost', token, ids).catch(() => {});
+  $('send').disabled = false;
+};
+
+// ---------- ホーム・明細 ----------
+
+function shiftMonth(n) {
+  const d = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5)) - 1 + n, 1);
+  ym = d.toLocaleDateString('sv').slice(0, 7);
+  loadMonth();
+}
+$('prevM').onclick = () => shiftMonth(-1);
+$('nextM').onclick = () => shiftMonth(1);
+
+async function loadMonth() {
+  $('ymLabel').textContent = ym.replace('-', '年') + '月';
+  const want = ym;
+  const had = months[want] || disk.get('month_' + want);
+  if (had) setMonth(had);
+  else { $('homeView').replaceChildren(); $('listBody').replaceChildren(); $('msg').textContent = '読み込み中…'; }
+  try {
+    const fresh = await run('getMonth', token, want);
+    if (!had && want === ym) $('msg').textContent = '';
+    setMonth(fresh);
+  } catch (e) { fail(e); }
+}
+
+function sumBy(list, key, val) {
+  const m = {};
+  list.forEach(x => { m[x[key]] = (m[x[key]] || 0) + Number(x[val] || 0); });
+  return Object.keys(m).sort((a, b) => m[b] - m[a]).map(k => [k, m[k]]);
+}
+
+function rows(title, pairs) {
+  return [el('h2', title)].concat(pairs.map(([k, v]) => {
+    const d = el('div', null, 'row');
+    d.append(el('span', k), el('span', yen(v)));
+    return d;
+  }));
+}
+
+function renderHome(data) {
+  const rs = data.receipts;
+  const total = rs.reduce((a, r) => a + Number(r.total || 0), 0);
+  const diff = total - data.prevTotal;
+  const needs = rs.filter(r => r.status !== 'ok').length;
+  $('homeView').replaceChildren(
+    el('div', yen(total), 'total'),
+    el('small', '自分が払った分　' + rs.length + '件　前月比 ' + (diff >= 0 ? '+' : '') + yen(diff)),
+    budgetBox(total),
+    el('div', needs ? '要確認・手入力が必要：' + needs + '件（明細で確認）' : '', needs ? 'card warn' : ''),
+    ...rows('カテゴリ別', sumBy(rs.flatMap(r => r.items), 'category', 'amount')),
+    ...rows('だれのため別', sumBy(rs, 'for_whom', 'total')));
+}
+
+// 自分の月の予算。空なら「決めない」。保存はその場で
+function budgetBox(total) {
+  const b = disk.get('boot') || {};
+  const d = el('div', null, 'card' + (b.budget != null && total > b.budget ? ' warn' : ''));
+  const line = el('div');
+  line.textContent = b.budget == null ? '今月の予算：決めていない' :
+    '今月の予算 ' + yen(b.budget) + '　' + (total > b.budget ? '超過 ' + yen(total - b.budget) : '残り ' + yen(b.budget - total));
+  const form = el('form');
+  form.hidden = true;
+  const inp = el('input');
+  inp.type = 'number'; inp.min = '0'; inp.step = '1'; inp.inputMode = 'numeric'; inp.placeholder = '円（空にすると決めない）';
+  inp.value = b.budget == null ? '' : b.budget;
+  const save = el('button', '保存');
+  form.append(inp, save);
+  form.onsubmit = async ev => {
+    ev.preventDefault();
+    save.disabled = true;
+    try {
+      b.budget = await run('setBudget', token, inp.value);
+      disk.set('boot', b);
+      renderHome(months[ym]);
+    } catch (e) { save.disabled = false; fail(e); }
+  };
+  const edit = el('button', '予算を変える');
+  edit.type = 'button';
+  edit.onclick = () => { form.hidden = !form.hidden; };
+  d.append(line, edit, form);
+  return d;
+}
+
+function fillFilters(data) {
+  const opts = (first, values) => [new Option(first, '')].concat([...new Set(values)].map(v => new Option(v, v)));
+  const keep = [$('fWhom').value, $('fCat').value];
+  $('fWhom').replaceChildren(...opts('だれのため：すべて', data.receipts.map(r => r.for_whom)));
+  $('fCat').replaceChildren(...opts('カテゴリ：すべて', data.receipts.flatMap(r => r.items.map(it => it.category))));
+  $('fWhom').value = keep[0];
+  $('fCat').value = keep[1];
+}
+
+function renderList() {
+  const data = months[ym];
+  if (!data) return;
+  const whom = $('fWhom').value, cat = $('fCat').value, text = $('fText').value.trim(), needs = $('fNeeds').checked;
+  const hit = data.receipts.filter(r =>
+    (!whom || r.for_whom === whom) &&
+    (!cat || r.items.some(it => it.category === cat)) &&
+    (!needs || r.status !== 'ok') &&
+    (!text || [r.store, r.memo].concat(r.items.map(it => it.name)).join(' ').indexOf(text) >= 0))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  $('listBody').replaceChildren(...hit.map(detail));
+  if (!hit.length) $('listBody').append(el('small', 'この条件のレシートはありません'));
+}
+['fWhom', 'fCat', 'fNeeds'].forEach(id => { $(id).onchange = renderList; });
+$('fText').oninput = renderList;
+
+function detail(r) {
+  const d = el('details', null, 'card' + (r.status === 'ok' ? '' : ' warn'));
+  d.append(el('summary', FLAG[r.status] + r.date.slice(5) + '　' + (r.store || '店名不明') + '　' + yen(r.total)));
+  d.append(el('small', r.receipt_id + '　だれのため：' + r.for_whom + (r.memo ? '　メモ：' + r.memo : '')), ...itemLines(r));
+  if (r.has_image) {
+    const b = el('button', 'レシートの画像を見る');
+    b.type = 'button';
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const img = el('img');
+        img.src = 'data:image/jpeg;base64,' + await run('getImage', token, r.receipt_id);
+        b.replaceWith(img);
+      } catch (e) { b.disabled = false; fail(e); }
+    };
+    d.append(b);
+  }
+  return d;
+}
+
+params = Object.fromEntries(new URLSearchParams(location.search));
+start();
+</script>
+</body>
+</html>

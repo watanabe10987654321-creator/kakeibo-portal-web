@@ -27,6 +27,10 @@
   .card summary { cursor: pointer; }
   .card img { max-width: 100%; margin-top: 8px; }
   .card button { font-size: 14px; padding: 8px; margin-top: 8px; background: #eee; color: #222; }
+  .cost { margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: #eef4ff; font-size: 14px; }
+  .cost.warn { background: #fff8e8; }
+  .cost.stop { background: #fdecea; }
+  .cost summary { cursor: pointer; font-weight: bold; }
   .edit input, .edit select { font-size: 16px; padding: 8px; margin-top: 2px; }
   .edit .item { display: grid; grid-template-columns: 1fr 88px; gap: 4px; border-top: 1px dashed #ddd; padding-top: 6px; margin-top: 6px; }
   .edit .item select { grid-column: 1 / -1; }
@@ -51,6 +55,8 @@
   <button data-view="home">ホーム</button>
   <button data-view="list">明細</button>
 </nav>
+
+<details id="costBar" class="cost" hidden><summary id="costLine"></summary><div id="costBody"></div></details>
 
 <form id="postView" hidden>
   <label>レシートの写真（最大10枚）
@@ -152,17 +158,56 @@ function show(v) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
   $('msg').textContent = '';
   if (v === 'home' || v === 'list') loadMonth();
+  if (v === 'home') refreshCost();
 }
 
 function needLogin() {
   token = null;
   disk.clear();
+  renderCost(null);
   if (params.m) show('login');
   else { show(''); $('msg').textContent = 'メールで届いたログインURLから開いてください。'; }
 }
 
+// ---------- 運用コスト（admin だけ・K034）。どの画面でも上に出す ----------
+
+const yen1 = n => (Math.round(n * 10) / 10).toLocaleString() + '円';  // AI は1回1円未満なので小数1桁
+let costAt = 0;
+
+function renderCost(c) {
+  $('costBar').hidden = !c;
+  if (!c) return;
+  const pct = c.limit > 0 ? Math.round(c.total / c.limit * 1000) / 10 : 0;
+  $('costBar').className = 'cost ' + c.state;
+  $('costLine').textContent = '運用コスト（今月）' + yen1(c.total) + ' / ' + Number(c.limit).toLocaleString() + '円（' + pct + '%）' + (c.state === 'stop' ? '　AI 停止中' : '');
+  const line = (k, v) => { const d = el('div', null, 'row'); d.append(el('span', k), el('span', v)); return d; };
+  $('costBody').replaceChildren(
+    line('AI 利用料（今月）', yen1(c.ai)),
+    line('固定費（今月）', yen1(c.fixed)),
+    line('上限までの残り', yen1(Math.max(0, c.limit - c.total))),
+    line('AI の読み取り回数（今月／累計）', c.calls_month + '回／' + c.calls_all + '回'),
+    line('1回あたりの平均', c.calls_all ? yen1(c.ai_all / c.calls_all) : '—'),
+    line('AI 利用料の累計', yen1(c.ai_all)),
+    el('h2', '月別の AI 利用料'),
+    ...c.months.slice().reverse().map(([m, v]) => line(m.replace('-', '年') + '月', yen1(v))),
+    el('small', c.at + ' 時点。画面を開いたとき・送信のあと・画面に戻ったときに更新'));
+}
+
+async function refreshCost(force) {
+  const b = disk.get('boot');
+  if (!token || !b || b.role !== 'admin' || (!force && Date.now() - costAt < 20000)) return;
+  costAt = Date.now();
+  try {
+    b.cost = await run('getCost', token);
+    disk.set('boot', b);
+    renderCost(b.cost);
+  } catch (e) { if (isAuth(e)) needLogin(); }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshCost(); });
+
 function applyBoot(b) {
   $('who').textContent = b.name + ' さん';
+  renderCost(b.role === 'admin' ? b.cost : null);
   const keep = $('forWhom').value;
   $('forWhom').replaceChildren(...b.forWhom.map(n => new Option(n, n)));
   if (keep) $('forWhom').value = keep;
@@ -189,6 +234,7 @@ async function start() {
     setMonth(b.month);
     delete b.month;
     disk.set('boot', b);
+    costAt = Date.now();
     applyBoot(b);
     if (!last) show('post');
     // ログインURL（7日で切れる）をアドレス欄から消す。ホーム画面に追加しても、ログイン済みの URL だけが残る
@@ -258,7 +304,7 @@ const newId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : 
 function kickReading() {
   try { fetch(API, { method: 'POST', body: JSON.stringify({ fn: 'processQueue', args: [token] }), keepalive: true }).catch(() => {}); } catch (e) {}
   // 読み終わったころに、見ている月を取り直す
-  setTimeout(() => { run('getMonth', token, ym).then(setMonth).catch(() => {}); }, 30000);
+  setTimeout(() => { run('getMonth', token, ym).then(setMonth).catch(() => {}); refreshCost(true); }, 30000);
 }
 
 let uploading = 0;

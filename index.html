@@ -441,6 +441,10 @@ function fillFilters(data) {
   $('fCat').value = keep[1];
 }
 
+// 開いているレシートと、前回描いた中身。裏で取り直しても、同じ内容なら作り直さない（K035）
+const openIds = new Set();
+let listSig = '';
+
 function renderList() {
   const data = months[ym];
   if (!data) return;
@@ -451,6 +455,9 @@ function renderList() {
     (!needs || needsCheck(r)) &&
     (!text || [r.store, r.memo].concat(r.items.map(it => it.name)).join(' ').indexOf(text) >= 0))
     .sort((a, b) => (a.date < b.date ? 1 : -1));
+  const sig = JSON.stringify(hit);
+  if (sig === listSig && $('listBody').children.length) return;  // 中身が変わっていなければ触らない（開いたまま・画像も消えない）
+  listSig = sig;
   $('listBody').replaceChildren(...hit.map(detail));
   if (!hit.length) $('listBody').append(el('small', 'この条件のレシートはありません'));
 }
@@ -459,6 +466,8 @@ $('fText').oninput = renderList;
 
 function detail(r) {
   const d = el('details', null, 'card' + (r.status === 'ok' ? '' : ' warn'));
+  d.open = openIds.has(r.receipt_id);  // 作り直しても開いたまま
+  d.ontoggle = () => { if (d.open) openIds.add(r.receipt_id); else openIds.delete(r.receipt_id); };
   d.append(el('summary', r.date.slice(5) + '　' + title(r)));
   d.append(el('small', r.receipt_id + '　だれのため：' + r.for_whom + (r.memo ? '　メモ：' + r.memo : '')), ...itemLines(r));
   if (r.has_image) {

@@ -115,8 +115,8 @@ const months = {};  // ym → getMonth の結果。端末にも保存し、開�
 // GAS はデータの受け渡しだけ（K027）。Content-Type を付けないので、ブラウザのアカウント情報が付かず、事前確認（preflight）も要らない
 const API = 'https://script.google.com/macros/s/AKfycbxnMOTrxYHRmhdHUSQHznL-L5cSMQM-4hLnWETNQvZqpEa-3Yu13DdcgtIGxzvaDNs/exec';
 // Google 側が一時的に JSON でなく HTML のエラーページを返すことがある（混雑・デプロイ直後・電波）。
-// 読むだけの呼び出しは1回だけ自動でやり直す。投稿は二重課金を避けるためやり直さない（K023）
-const RETRY = ['getBootstrap', 'getMonth', 'getImage'];
+// 読むだけの呼び出しと受付は1回だけ自動でやり直す。受付は送信 ID で重複を捨て、AI も呼ばないので、やり直しても二重登録・課金にならない（K033）
+const RETRY = ['getBootstrap', 'getMonth', 'getImage', 'postReceipt'];
 const NET_ERROR = '通信に失敗しました。少し待ってからもう一度試してください';
 async function run(fn, ...args) {
   for (let i = 0; ; i++) {
@@ -235,7 +235,11 @@ async function shrink(file) {
   return c.toDataURL('image/jpeg', 0.8).split(',')[1];
 }
 
-const FLAG = { ok: '', needs_review: '【要確認】', needs_input: '【手入力が必要】' };
+// 人が見る必要があるもの（読み取り中は待てば済むので数えない）
+const needsCheck = r => r.status === 'needs_review' || r.status === 'needs_input';
+// 読み取り中は店名も金額もまだ無いので出さない
+const title = r => FLAG[r.status] + (r.status === 'processing' ? (r.total == null ? '' : yen(r.total)) : (r.store || '店名不明') + '　' + yen(r.total));
+const FLAG = { ok: '', needs_review: '【要確認】', needs_input: '【手入力が必要】', processing: '【読み取り中】' };
 
 function itemLines(r) {
   return r.items.map(it => el('small', '・' + it.name + '　' + yen(it.amount) + '（' + it.category + '）'));
@@ -243,47 +247,62 @@ function itemLines(r) {
 
 function card(r) {
   const d = el('div', null, 'card' + (r.status === 'ok' ? '' : ' warn'));
-  d.append(el('b', FLAG[r.status] + (r.store || '店名不明') + '　' + yen(r.total)), el('small', r.receipt_id + '　' + r.date), ...itemLines(r));
+  d.append(el('b', title(r)), el('small', r.receipt_id + '　' + r.date), ...itemLines(r));
   return d;
 }
 
-$('postView').onsubmit = async ev => {
+// 1枚ごとの送信 ID。同じ送信が2回届いてもサーバーで1件にする
+const newId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+
+// 読み取りの依頼は結果を待たない。keepalive なので画面を閉じても届く。届かなくても10分ごとの見回りが拾う
+function kickReading() {
+  try { fetch(API, { method: 'POST', body: JSON.stringify({ fn: 'processQueue', args: [token] }), keepalive: true }).catch(() => {}); } catch (e) {}
+  // 読み終わったころに、見ている月を取り直す
+  setTimeout(() => { run('getMonth', token, ym).then(setMonth).catch(() => {}); }, 30000);
+}
+
+let uploading = 0;
+window.addEventListener('beforeunload', ev => { if (uploading) { ev.preventDefault(); ev.returnValue = ''; } });
+
+$('postView').onsubmit = ev => {
   ev.preventDefault();
   const files = [...$('files').files].slice(0, 10);
   const amount = files.length <= 1 ? $('amount').value : '';
   if (!files.length && amount === '') { $('msg').textContent = '写真か金額のどちらかを入れてください。'; return; }
-  $('send').disabled = true;
-  $('results').replaceChildren();
-  const ids = [];
   if ($('forWhom').value === 'その他' && !$('forWhomOther').value.trim()) { $('msg').textContent = '「その他」の名前を入れてください。'; return; }
+  $('msg').textContent = '';
   const base = { for_whom: $('forWhom').value, for_whom_other: $('forWhomOther').value, amount: amount, memo: $('memo').value };
-  const jobs = files.length ? files : [null];
-  let done = 0;
-  const errors = [];
-  const progress = () => { $('msg').textContent = '送信中… ' + done + '/' + jobs.length + '（AI が読み取り中。1枚 10〜20秒）'; };
-  progress();
-  // ponytail: 同時3本。GAS 側の上限（同時実行30）には遠い
+  // 入力欄はすぐ空に戻す。続けて次のレシートを送れる
+  $('postView').reset();
+  $('forWhomOther').hidden = true;
+  const jobs = (files.length ? files : [null]).map(f => {
+    const slot = el('div', '送信中…', 'card');
+    $('results').prepend(slot);
+    return { f, slot, request_id: newId() };
+  });
+  uploading += jobs.length;
+  let accepted = 0;
   const worker = async () => {
     while (jobs.length) {
-      const f = jobs.shift();
+      const j = jobs.shift();
       try {
-        const r = await run('postReceipt', token, Object.assign({}, base, f ? { image: await shrink(f) } : {}));
-        ids.push(r.receipt_id);
-        $('results').append(card(r));
+        const r = await run('postReceipt', token, Object.assign({ request_id: j.request_id }, base, j.f ? { image: await shrink(j.f) } : {}));
+        const c = card(r);
+        if (r.status === 'processing') c.append(el('small', '受け付けました。AI の読み取りは裏で進みます。結果はメールと明細に届きます（画面は閉じても大丈夫）'));
+        j.slot.replaceWith(c);
+        if (r.status === 'processing') accepted++;
         const m = months[r.date.slice(0, 7)] || disk.get('month_' + r.date.slice(0, 7));
         if (m) { m.receipts.push(r); setMonth(m); }
-      } catch (e) { errors.push(e); }
-      done++;
-      progress();
+      } catch (e) {
+        if (isAuth(e)) { uploading = 0; return needLogin(); }
+        j.slot.textContent = '送れませんでした：' + e.message;
+        j.slot.className = 'card warn';
+      }
+      uploading--;
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
-  $('msg').textContent = '';
-  if (errors.some(isAuth)) needLogin();
-  else if (errors.length) $('msg').textContent = errors.length + '件を送れませんでした：' + errors[0].message;
-  else $('postView').reset();
-  if (ids.length) run('finishPost', token, ids).catch(() => {});
-  $('send').disabled = false;
+  // ponytail: 同時3本。GAS 側の上限（同時実行30）には遠い
+  Promise.all([worker(), worker(), worker()]).then(() => { if (accepted) kickReading(); });
 };
 
 // ---------- ホーム・明細 ----------
@@ -327,7 +346,7 @@ function renderHome(data) {
   const rs = data.receipts;
   const total = rs.reduce((a, r) => a + Number(r.total || 0), 0);
   const diff = total - data.prevTotal;
-  const needs = rs.filter(r => r.status !== 'ok').length;
+  const needs = rs.filter(needsCheck).length;
   $('homeView').replaceChildren(
     el('div', yen(total), 'total'),
     el('small', '自分が払った分　' + rs.length + '件　前月比 ' + (diff >= 0 ? '+' : '') + yen(diff)),
@@ -383,7 +402,7 @@ function renderList() {
   const hit = data.receipts.filter(r =>
     (!whom || r.for_whom === whom) &&
     (!cat || r.items.some(it => it.category === cat)) &&
-    (!needs || r.status !== 'ok') &&
+    (!needs || needsCheck(r)) &&
     (!text || [r.store, r.memo].concat(r.items.map(it => it.name)).join(' ').indexOf(text) >= 0))
     .sort((a, b) => (a.date < b.date ? 1 : -1));
   $('listBody').replaceChildren(...hit.map(detail));
@@ -394,7 +413,7 @@ $('fText').oninput = renderList;
 
 function detail(r) {
   const d = el('details', null, 'card' + (r.status === 'ok' ? '' : ' warn'));
-  d.append(el('summary', FLAG[r.status] + r.date.slice(5) + '　' + (r.store || '店名不明') + '　' + yen(r.total)));
+  d.append(el('summary', r.date.slice(5) + '　' + title(r)));
   d.append(el('small', r.receipt_id + '　だれのため：' + r.for_whom + (r.memo ? '　メモ：' + r.memo : '')), ...itemLines(r));
   if (r.has_image) {
     const b = el('button', 'レシートの画像を見る');
@@ -412,8 +431,34 @@ function detail(r) {
   const e = el('button', '直す');
   e.type = 'button';
   e.onclick = () => { e.hidden = true; d.append(editForm(r, () => { e.hidden = false; })); };
-  d.append(e);
+  const del = el('button', 'このレシートを削除');
+  del.type = 'button';
+  del.style.color = '#c00';
+  del.onclick = () => { if (confirm((r.store || 'このレシート') + ' ' + yen(r.total) + ' を削除しますか？')) applyEdit(r, { receipt_id: r.receipt_id, deleted: true }); };
+  d.append(e, del);
   return d;
+}
+
+// 画面を先に書き換え、裏で保存。失敗したら元に戻す（K030）
+async function applyEdit(r, patch) {
+  const m = months[ym];
+  const old = m.receipts.slice();
+  const guess = patch.deleted ? null : Object.assign({}, r, {
+    store: patch.store, date: patch.date, total: patch.total === '' ? null : Number(patch.total), for_whom: patch.for_whom === 'その他' ? patch.for_whom_other : patch.for_whom,
+    memo: patch.memo, status: 'ok', items: patch.items.filter(it => !it.deleted).map(it => ({ name: it.name, amount: Number(it.amount), category: it.category, for_whom: r.for_whom })),
+  });
+  const moved = guess && guess.date.slice(0, 7) !== ym;
+  m.receipts = guess && !moved ? m.receipts.map(x => (x.receipt_id === r.receipt_id ? guess : x)) : m.receipts.filter(x => x.receipt_id !== r.receipt_id);
+  setMonth(m);
+  if (moved) delete months[guess.date.slice(0, 7)];
+  try {
+    const fresh = await run('saveReceipt', token, patch);
+    if (fresh && fresh.date.slice(0, 7) === ym) { m.receipts = m.receipts.map(x => (x.receipt_id === r.receipt_id ? fresh : x)); setMonth(m); }
+  } catch (e) {
+    m.receipts = old;
+    setMonth(m);
+    fail(e);
+  }
 }
 
 // ---------- 編集（P3）。画面を先に書き換え、裏で保存。失敗したら元に戻す ----------
@@ -466,27 +511,7 @@ function editForm(r, onClose) {
   f.append(items, add, save, cancel, remove);
   cancel.onclick = () => { f.remove(); onClose(); };
 
-  const apply = async patch => {
-    const m = months[ym];
-    const old = m.receipts.slice();
-    const i = m.receipts.findIndex(x => x.receipt_id === r.receipt_id);
-    const guess = patch.deleted ? null : Object.assign({}, r, {
-      store: patch.store, date: patch.date, total: patch.total === '' ? null : Number(patch.total), for_whom: patch.for_whom === 'その他' ? patch.for_whom_other : patch.for_whom,
-      memo: patch.memo, status: 'ok', items: patch.items.filter(it => !it.deleted).map(it => ({ name: it.name, amount: Number(it.amount), category: it.category, for_whom: r.for_whom })),
-    });
-    if (guess && guess.date.slice(0, 7) !== ym) guess.__moved = true;
-    m.receipts = guess && !guess.__moved ? m.receipts.map(x => (x.receipt_id === r.receipt_id ? guess : x)) : m.receipts.filter(x => x.receipt_id !== r.receipt_id);
-    setMonth(m);
-    if (guess && guess.__moved) delete months[guess.date.slice(0, 7)];
-    try {
-      const fresh = await run('saveReceipt', token, patch);
-      if (fresh && fresh.date.slice(0, 7) === ym) { m.receipts = m.receipts.map(x => (x.receipt_id === r.receipt_id ? fresh : x)); setMonth(m); }
-    } catch (e) {
-      m.receipts = old;
-      setMonth(m);
-      fail(e);
-    }
-  };
+  const apply = patch => applyEdit(r, patch);
   f.onsubmit = ev => {
     ev.preventDefault();
     apply({ receipt_id: r.receipt_id, store: store.value, date: date.value, total: total.value, for_whom: whom.value, for_whom_other: whomOther.value, memo: memo.value,

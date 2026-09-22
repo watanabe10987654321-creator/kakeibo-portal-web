@@ -114,15 +114,30 @@ const months = {};  // ym → getMonth の結果。端末にも保存し、開�
 
 // GAS はデータの受け渡しだけ（K027）。Content-Type を付けないので、ブラウザのアカウント情報が付かず、事前確認（preflight）も要らない
 const API = 'https://script.google.com/macros/s/AKfycbxnMOTrxYHRmhdHUSQHznL-L5cSMQM-4hLnWETNQvZqpEa-3Yu13DdcgtIGxzvaDNs/exec';
+// Google 側が一時的に JSON でなく HTML のエラーページを返すことがある（混雑・デプロイ直後・電波）。
+// 読むだけの呼び出しは1回だけ自動でやり直す。投稿は二重課金を避けるためやり直さない（K023）
+const RETRY = ['getBootstrap', 'getMonth', 'getImage'];
+const NET_ERROR = '通信に失敗しました。少し待ってからもう一度試してください';
 async function run(fn, ...args) {
-  const res = await fetch(API, { method: 'POST', body: JSON.stringify({ fn: fn, args: args }) });
-  const j = await res.json();
-  if (j.error) throw new Error(j.error);
-  return j.result;
+  for (let i = 0; ; i++) {
+    let j;
+    try {
+      const res = await fetch(API, { method: 'POST', body: JSON.stringify({ fn: fn, args: args }) });
+      j = JSON.parse(await res.text());
+    } catch (e) {
+      if (RETRY.indexOf(fn) >= 0 && i === 0) { await new Promise(r => setTimeout(r, 1500)); continue; }
+      throw new Error(NET_ERROR);
+    }
+    if (j.error) throw new Error(j.error);
+    return j.result;
+  }
 }
 
+// ログアウトするのは、サーバーが「セッションが無効」と答えたときだけ（K031）
+const isAuth = e => String(e && e.message) === 'AUTH';
+
 function fail(e) {
-  if (String(e.message).indexOf('AUTH') >= 0) needLogin();
+  if (isAuth(e)) needLogin();
   else $('msg').textContent = e.message;
 }
 
@@ -176,7 +191,13 @@ async function start() {
     disk.set('boot', b);
     applyBoot(b);
     if (!last) show('post');
-  } catch (e) { needLogin(); }
+    // ログインURL（7日で切れる）をアドレス欄から消す。ホーム画面に追加しても、ログイン済みの URL だけが残る
+    if (params.m) history.replaceState(null, '', location.pathname);
+  } catch (e) {
+    if (isAuth(e)) return needLogin();
+    if (!last) show('');
+    $('msg').textContent = e.message + '（ページを再読み込みしてください）';
+  }
 }
 
 $('loginView').onsubmit = async ev => {
@@ -248,7 +269,7 @@ $('postView').onsubmit = async ev => {
   };
   await Promise.all([worker(), worker(), worker()]);
   $('msg').textContent = '';
-  if (errors.some(e => String(e.message).indexOf('AUTH') >= 0)) needLogin();
+  if (errors.some(isAuth)) needLogin();
   else if (errors.length) $('msg').textContent = errors.length + '件を送れませんでした：' + errors[0].message;
   else $('postView').reset();
   if (ids.length) run('finishPost', token, ids).catch(() => {});

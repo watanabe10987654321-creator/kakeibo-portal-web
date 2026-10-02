@@ -63,7 +63,10 @@
     <input id="files" type="file" accept="image/*" multiple>
   </label>
   <label id="kindRow" hidden>種別
-    <select id="kind"><option value="">支出（レシート）</option><option value="income">収入（入金のスクショ）</option></select>
+    <select id="kind"><option value="">支出（レシート）</option><option value="statement">明細のスクショ（何件でも）</option><option value="income">収入（入金のスクショ）</option></select>
+  </label>
+  <label id="accountRow" hidden>支払元
+    <select id="account"></select>
   </label>
   <label>だれのため
     <select id="forWhom"></select>
@@ -209,7 +212,9 @@ async function refreshCost(force) {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshCost(); });
 
 function applyBoot(b) {
-  $('kindRow').hidden = b.role !== 'admin';  // 収入は admin だけ（K041）
+  $('kindRow').hidden = b.role !== 'admin';  // 収入・明細は admin だけ（K041・K049）
+  $('accountRow').hidden = !(b.accounts && b.accounts.length);
+  if (b.accounts) { const keep = $('account').value; $('account').replaceChildren(new Option('現金・その他', ''), ...b.accounts.map(a => new Option(a, a))); $('account').value = keep; }
   $('who').textContent = b.name + ' さん';
   renderCost(b.role === 'admin' ? b.cost : null);
   const keep = $('forWhom').value;
@@ -288,7 +293,7 @@ async function shrink(file) {
 // 人が見る必要があるもの（読み取り中は待てば済むので数えない）
 const needsCheck = r => r.status === 'needs_review' || r.status === 'needs_input';
 // 読み取り中は店名も金額もまだ無いので出さない
-const KIND = { income: '【収入】', matched: '【照合済み】', expense: '' };
+const KIND = { income: '【収入】', matched: '【照合済み】', statement: '【明細】', expense: '' };
 const title = r => (KIND[r.kind] || '') + FLAG[r.status] + (r.status === 'processing' ? (r.total == null ? '' : yen(r.total)) : (r.store || '店名不明') + '　' + yen(r.total));
 const FLAG = { ok: '', needs_review: '【要確認】', needs_input: '【手入力が必要】', processing: '【読み取り中】' };
 
@@ -320,9 +325,10 @@ $('postView').onsubmit = ev => {
   const files = [...$('files').files].slice(0, 10);
   const amount = files.length <= 1 ? $('amount').value : '';
   if (!files.length && amount === '') { $('msg').textContent = '写真か金額のどちらかを入れてください。'; return; }
+  if ($('kind').value === 'statement' && !files.length) { $('msg').textContent = '明細のスクショを選んでください。'; return; }
   if ($('forWhom').value === 'その他' && !$('forWhomOther').value.trim()) { $('msg').textContent = '「その他」の名前を入れてください。'; return; }
   $('msg').textContent = '';
-  const base = { for_whom: $('forWhom').value, for_whom_other: $('forWhomOther').value, amount: amount, memo: $('memo').value, kind: $('kind').value };
+  const base = { for_whom: $('forWhom').value, for_whom_other: $('forWhomOther').value, amount: amount, memo: $('memo').value, kind: $('kind').value, account: $('account').value };
   // 入力欄はすぐ空に戻す。続けて次のレシートを送れる
   $('postView').reset();
   $('forWhomOther').hidden = true;

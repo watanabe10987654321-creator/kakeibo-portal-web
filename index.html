@@ -214,7 +214,8 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 function applyBoot(b) {
   $('kindRow').hidden = b.role !== 'admin';  // 収入・明細は admin だけ（K041・K049）
   $('accountRow').hidden = !(b.accounts && b.accounts.length);
-  if (b.accounts) { const keep = $('account').value; $('account').replaceChildren(new Option('現金・その他', ''), ...b.accounts.map(a => new Option(a, a))); $('account').value = keep; }
+  // 支払元は前回選んだものにそろえる（端末に覚える。K050）
+  if (b.accounts) { const keep = $('account').value || disk.get('account') || ''; $('account').replaceChildren(new Option('現金・その他', ''), ...b.accounts.map(a => new Option(a, a))); $('account').value = b.accounts.indexOf(keep) >= 0 ? keep : ''; }
   $('who').textContent = b.name + ' さん';
   renderCost(b.role === 'admin' ? b.cost : null);
   const keep = $('forWhom').value;
@@ -329,8 +330,11 @@ $('postView').onsubmit = ev => {
   if ($('forWhom').value === 'その他' && !$('forWhomOther').value.trim()) { $('msg').textContent = '「その他」の名前を入れてください。'; return; }
   $('msg').textContent = '';
   const base = { for_whom: $('forWhom').value, for_whom_other: $('forWhomOther').value, amount: amount, memo: $('memo').value, kind: $('kind').value, account: $('account').value };
+  disk.set('account', $('account').value);
+  const keepAccount = $('account').value;
   // 入力欄はすぐ空に戻す。続けて次のレシートを送れる
   $('postView').reset();
+  $('account').value = keepAccount;  // 支払元は次の投稿にも引き継ぐ
   $('forWhomOther').hidden = true;
   const jobs = (files.length ? files : [null]).map(f => {
     const slot = el('div', '送信中…', 'card');

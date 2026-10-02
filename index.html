@@ -288,7 +288,8 @@ async function shrink(file) {
 // 人が見る必要があるもの（読み取り中は待てば済むので数えない）
 const needsCheck = r => r.status === 'needs_review' || r.status === 'needs_input';
 // 読み取り中は店名も金額もまだ無いので出さない
-const title = r => (r.kind === 'income' ? '【収入】' : '') + FLAG[r.status] + (r.status === 'processing' ? (r.total == null ? '' : yen(r.total)) : (r.store || '店名不明') + '　' + yen(r.total));
+const KIND = { income: '【収入】', matched: '【照合済み】', expense: '' };
+const title = r => (KIND[r.kind] || '') + FLAG[r.status] + (r.status === 'processing' ? (r.total == null ? '' : yen(r.total)) : (r.store || '店名不明') + '　' + yen(r.total));
 const FLAG = { ok: '', needs_review: '【要確認】', needs_input: '【手入力が必要】', processing: '【読み取り中】' };
 
 function itemLines(r) {
@@ -394,7 +395,7 @@ function rows(title, pairs) {
 
 function renderHome(data) {
   const all = data.receipts;
-  const rs = all.filter(r => r.kind !== 'income');  // 支出だけ（カテゴリ別・だれのため別・予算はこちら）
+  const rs = all.filter(r => (r.kind || 'expense') === 'expense');  // 支出だけ。収入と、写真と照合済みのカード明細は数えない
   const incomes = all.filter(r => r.kind === 'income');
   const total = rs.reduce((a, r) => a + Number(r.total || 0), 0);
   const income = incomes.reduce((a, r) => a + Number(r.total || 0), 0);
@@ -407,7 +408,8 @@ function renderHome(data) {
     budgetBox(total),
     el('div', needs ? '要確認・手入力が必要：' + needs + '件（明細で確認）' : '', needs ? 'card warn' : ''),
     ...rows('カテゴリ別', sumBy(rs.flatMap(r => r.items), 'category', 'amount')),
-    ...rows('だれのため別', sumBy(rs, 'for_whom', 'total')));
+    ...rows('だれのため別', sumBy(rs, 'for_whom', 'total')),
+    ...(rs.some(r => r.account) ? rows('支払元別', sumBy(rs.map(r => Object.assign({}, r, { account: r.account || '現金・その他' })), 'account', 'total')) : []));
 }
 
 // 自分の月の予算。空なら「決めない」。保存はその場で
@@ -477,7 +479,7 @@ function detail(r) {
   d.open = openIds.has(r.receipt_id);  // 作り直しても開いたまま
   d.ontoggle = () => { if (d.open) openIds.add(r.receipt_id); else openIds.delete(r.receipt_id); };
   d.append(el('summary', r.date.slice(5) + '　' + title(r)));
-  d.append(el('small', r.receipt_id + '　だれのため：' + r.for_whom + (r.memo ? '　メモ：' + r.memo : '')), ...itemLines(r));
+  d.append(el('small', r.receipt_id + '　だれのため：' + r.for_whom + (r.account ? '　支払元：' + r.account : '') + (r.memo ? '　メモ：' + r.memo : '')), ...itemLines(r));
   if (r.has_image) {
     const b = el('button', 'レシートの画像を見る');
     b.type = 'button';

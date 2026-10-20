@@ -122,6 +122,7 @@ let token = disk.get('token');
 let params = {};
 let view = 'post';
 let ym = new Date().toLocaleDateString('sv').slice(0, 7);
+let cycleDay = 1;  // 締め日（Members.cycle_day）。日付がどの集計月かの判定に使う（K052・K056）
 const months = {};  // ym → getMonth の結果。端末にも保存し、開いた瞬間は前回分を出してから裏で最新に差し替える
 
 // GAS はデータの受け渡しだけ（K027）。Content-Type を付けないので、ブラウザのアカウント情報が付かず、事前確認（preflight）も要らない
@@ -212,6 +213,7 @@ async function refreshCost(force) {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshCost(); });
 
 function applyBoot(b) {
+  cycleDay = Number(b.cycle_day) || 1;
   $('kindRow').hidden = false;  // おまかせは全員。収入・明細の選択肢は admin だけ（K041・K049・K052）
   [...$('kind').options].forEach(o => { if (o.value === 'statement' || o.value === 'income') o.hidden = b.role !== 'admin'; });
   $('accountRow').hidden = !(b.accounts && b.accounts.length);
@@ -317,8 +319,17 @@ const newId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : 
 // 読み取りの依頼は結果を待たない。keepalive なので画面を閉じても届く。届かなくても10分ごとの見回りが拾う
 function kickReading() {
   try { fetch(API, { method: 'POST', body: JSON.stringify({ fn: 'processQueue', args: [token] }), keepalive: true }).catch(() => {}); } catch (e) {}
-  // 読み終わったころに、見ている月を取り直す
-  setTimeout(() => { run('getMonth', token, ym).then(setMonth).catch(() => {}); refreshCost(true); }, 30000);
+  // 読み終わるまで30秒ごとに見ている月を取り直す（明細を何枚も送ると数分かかる。最長5分。K056）
+  let n = 0;
+  const poll = () => setTimeout(async () => {
+    try {
+      const m = await run('getMonth', token, ym);
+      setMonth(m);
+      refreshCost(true);
+      if (m.receipts.some(r => r.status === 'processing') && ++n < 10) poll();
+    } catch (e) {}
+  }, 30000);
+  poll();
 }
 
 let uploading = 0;
@@ -355,7 +366,7 @@ $('postView').onsubmit = ev => {
         if (r.status === 'processing') c.append(el('small', '受け付けました。AI の読み取りは裏で進みます。結果はメールと明細に届きます（画面は閉じても大丈夫）'));
         j.slot.replaceWith(c);
         if (r.status === 'processing') accepted++;
-        const m = months[r.date.slice(0, 7)] || disk.get('month_' + r.date.slice(0, 7));
+        const m = months[ymOf(r.date)] || disk.get('month_' + ymOf(r.date));
         if (m) { m.receipts.push(r); setMonth(m); }
       } catch (e) {
         if (isAuth(e)) { uploading = 0; return needLogin(); }
@@ -375,6 +386,12 @@ function shiftMonth(n) {
   const d = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5)) - 1 + n, 1);
   ym = d.toLocaleDateString('sv').slice(0, 7);
   loadMonth();
+}
+// 日付 → その人の集計月（締め日が16なら 10/16 以降は 11月分）
+function ymOf(date) {
+  const m = date.slice(0, 7);
+  if (cycleDay === 1 || Number(date.slice(8)) < cycleDay) return m;
+  return new Date(Number(m.slice(0, 4)), Number(m.slice(5)), 1).toLocaleDateString('sv').slice(0, 7);
 }
 $('prevM').onclick = () => shiftMonth(-1);
 $('nextM').onclick = () => shiftMonth(1);
@@ -525,13 +542,13 @@ async function applyEdit(r, patch) {
     store: patch.store, date: patch.date, total: patch.total === '' ? null : Number(patch.total), for_whom: patch.for_whom === 'その他' ? patch.for_whom_other : patch.for_whom,
     memo: patch.memo, status: 'ok', kind: patch.count && r.kind === 'matched' ? 'expense' : r.kind, items: patch.items.filter(it => !it.deleted).map(it => ({ name: it.name, amount: Number(it.amount), category: it.category, for_whom: r.for_whom })),
   });
-  const moved = guess && guess.date.slice(0, 7) !== ym;
+  const moved = guess && ymOf(guess.date) !== ym;
   m.receipts = guess && !moved ? m.receipts.map(x => (x.receipt_id === r.receipt_id ? guess : x)) : m.receipts.filter(x => x.receipt_id !== r.receipt_id);
   setMonth(m);
-  if (moved) delete months[guess.date.slice(0, 7)];
+  if (moved) delete months[ymOf(guess.date)];
   try {
     const fresh = await run('saveReceipt', token, patch);
-    if (fresh && fresh.date.slice(0, 7) === ym) { m.receipts = m.receipts.map(x => (x.receipt_id === r.receipt_id ? fresh : x)); setMonth(m); }
+    if (fresh && ymOf(fresh.date) === ym) { m.receipts = m.receipts.map(x => (x.receipt_id === r.receipt_id ? fresh : x)); setMonth(m); }
   } catch (e) {
     m.receipts = old;
     setMonth(m);

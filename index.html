@@ -83,6 +83,13 @@
   </label>
   <button id="send">送る</button>
   <div id="results"></div>
+  <div id="csvRow" hidden>
+    <label>dカードの CSV（ダウンロードしたもの。何本でも。重なりは自動で除く）
+      <input id="csvFiles" type="file" accept=".csv,text/csv" multiple>
+    </label>
+    <button type="button" id="csvGo">CSV を確かめて取り込む</button>
+    <div id="csvMsg"></div>
+  </div>
 </form>
 
 <div id="monthBar" class="month" hidden>
@@ -224,6 +231,7 @@ function applyBoot(b) {
   if (b.accounts) { const keep = $('account').value || disk.get('account') || ''; $('account').replaceChildren(new Option('現金・その他', ''), ...b.accounts.map(a => new Option(a, a))); $('account').value = b.accounts.indexOf(keep) >= 0 ? keep : ''; }
   if (b.periods) $('periodYm').replaceChildren(...b.periods.map(p => new Option(p.label, p.ym)));
   togglePeriod();
+  $('csvRow').hidden = !(b.accounts && b.accounts.indexOf('dカード') >= 0);
   $('who').textContent = b.name + ' さん';
   renderCost(b.role === 'admin' ? b.cost : null);
   const keep = $('forWhom').value;
@@ -346,6 +354,32 @@ function togglePeriod() {
 }
 $('kind').addEventListener('change', togglePeriod);
 $('account').addEventListener('change', togglePeriod);
+
+// dカードの CSV（K058）：先に件数だけ確かめ、了承したら取り込む
+$('csvGo').onclick = async () => {
+  const files = [...$('csvFiles').files];
+  if (!files.length) { $('csvMsg').textContent = 'CSV を選んでください。'; return; }
+  $('csvGo').disabled = true;
+  $('csvMsg').textContent = '確かめています…';
+  try {
+    const texts = await Promise.all(files.map(f => f.text()));
+    const d = await run('importCardCsv', token, { files: texts, dry: true });
+    const say = r => r.unique + ' 件の取引（' + r.from + '〜' + r.to + '）のうち、入っている ' + r.already + ' 件・写真や手入力と同じ ' + r.same_as_existing + ' 件を除き、' + r.added + ' 件' + (r.dry ? 'を足します' : 'を足した') + (r.unreadable ? '（読めない CSV ' + r.unreadable + ' 本）' : '');
+    if (!d.added) { $('csvMsg').textContent = say(d) + '。足すものはありません。'; return; }
+    if (!confirm(say(d) + '。よいですか？')) { $('csvMsg').textContent = '取りやめました。'; return; }
+    $('csvMsg').textContent = '取り込んでいます…';
+    const r = await run('importCardCsv', token, { files: texts, dry: false });
+    $('csvMsg').textContent = say(r) + '。';
+    $('csvFiles').value = '';
+    Object.keys(months).forEach(k => delete months[k]);
+    loadMonth();
+  } catch (e) {
+    if (isAuth(e)) return needLogin();
+    $('csvMsg').textContent = '取り込めませんでした：' + e.message;
+  } finally {
+    $('csvGo').disabled = false;
+  }
+};
 
 $('postView').onsubmit = ev => {
   ev.preventDefault();

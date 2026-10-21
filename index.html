@@ -68,6 +68,9 @@
   <label id="accountRow" hidden>支払元
     <select id="account"></select>
   </label>
+  <label id="periodRow" hidden>いつの支払い分か（dカードの明細）
+    <select id="periodYm"></select>
+  </label>
   <label>だれのため
     <select id="forWhom"></select>
     <input id="forWhomOther" maxlength="30" placeholder="名前を入力" hidden>
@@ -219,6 +222,8 @@ function applyBoot(b) {
   $('accountRow').hidden = !(b.accounts && b.accounts.length);
   // 支払元は前回選んだものにそろえる（端末に覚える。K050）
   if (b.accounts) { const keep = $('account').value || disk.get('account') || ''; $('account').replaceChildren(new Option('現金・その他', ''), ...b.accounts.map(a => new Option(a, a))); $('account').value = b.accounts.indexOf(keep) >= 0 ? keep : ''; }
+  if (b.periods) $('periodYm').replaceChildren(...b.periods.map(p => new Option(p.label, p.ym)));
+  togglePeriod();
   $('who').textContent = b.name + ' さん';
   renderCost(b.role === 'admin' ? b.cost : null);
   const keep = $('forWhom').value;
@@ -335,6 +340,13 @@ function kickReading() {
 let uploading = 0;
 window.addEventListener('beforeunload', ev => { if (uploading) { ev.preventDefault(); ev.returnValue = ''; } });
 
+// dカードの明細を送るときだけ「いつの支払い分か」を選ぶ（K057）
+function togglePeriod() {
+  $('periodRow').hidden = !($('kind').value === 'statement' && $('account').value === 'dカード' && $('periodYm').options.length);
+}
+$('kind').addEventListener('change', togglePeriod);
+$('account').addEventListener('change', togglePeriod);
+
 $('postView').onsubmit = ev => {
   ev.preventDefault();
   const files = [...$('files').files].slice(0, 10);
@@ -343,12 +355,13 @@ $('postView').onsubmit = ev => {
   if ($('kind').value === 'statement' && !files.length) { $('msg').textContent = '明細のスクショを選んでください。'; return; }
   if ($('forWhom').value === 'その他' && !$('forWhomOther').value.trim()) { $('msg').textContent = '「その他」の名前を入れてください。'; return; }
   $('msg').textContent = '';
-  const base = { for_whom: $('forWhom').value, for_whom_other: $('forWhomOther').value, amount: amount, memo: $('memo').value, kind: $('kind').value, account: $('account').value };
+  const base = { for_whom: $('forWhom').value, for_whom_other: $('forWhomOther').value, amount: amount, memo: $('memo').value, kind: $('kind').value, account: $('account').value, period_ym: $('periodRow').hidden ? '' : $('periodYm').value };
   disk.set('account', $('account').value);
   const keepAccount = $('account').value;
   // 入力欄はすぐ空に戻す。続けて次のレシートを送れる
   $('postView').reset();
   $('account').value = keepAccount;  // 支払元は次の投稿にも引き継ぐ
+  togglePeriod();
   $('forWhomOther').hidden = true;
   const jobs = (files.length ? files : [null]).map(f => {
     const slot = el('div', '送信中…', 'card');

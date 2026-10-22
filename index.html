@@ -486,7 +486,58 @@ function renderHome(data) {
     el('div', needs ? '要確認・手入力が必要：' + needs + '件（明細で確認）' : '', needs ? 'card warn' : ''),
     ...rows('カテゴリ別', sumBy(rs.flatMap(r => r.items), 'category', 'amount')),
     ...rows('だれのため別', sumBy(rs, 'for_whom', 'total')),
-    ...(rs.some(r => r.account) ? rows('支払元別', sumBy(rs.map(r => Object.assign({}, r, { account: r.account || '現金・その他' })), 'account', 'total')) : []));
+    ...(rs.some(r => r.account) ? rows('支払元別', sumBy(rs.map(r => Object.assign({}, r, { account: r.account || '現金・その他' })), 'account', 'total')) : []),
+    ...payBox((disk.get('boot') || {}).accounts || []));
+}
+
+// ---------- 引き落とし日（K061）。支払元ごとの締め日と引き落とし日。休日（土日・祝日・年末年始）は翌営業日 ----------
+// dカード：15日締め・翌月10日（CSV の実際の引き落とし日 2026/1/13・5/11・10/13 と一致）。楽天カード：月末締め・翌月27日。UFJ：毎月最後の平日（渡邊の指定）
+const PAY_RULES = [
+  { name: 'dカード（d払いを含む）', accounts: ['dカード', 'd払い'], close: 15, day: 10 },
+  { name: '楽天カード（楽天ペイを含む）', accounts: ['楽天Visa', '楽天JCB', '楽天ペイ'], close: 0, day: 27 },
+  { name: 'UFJ（口座）', accounts: ['UFJ'], lastWeekday: true },
+];
+const iso = d => d.toLocaleDateString('sv');
+// 日本の祝日（内閣府の決まりを計算で。春分・秋分は 1980〜2099 年の近似式）
+function isHoliday(d) {
+  const y = d.getFullYear(), m = d.getMonth() + 1, day = d.getDate(), w = d.getDay();
+  if ((m === 12 && day === 31) || (m === 1 && day <= 3)) return true;  // 銀行の年末年始
+  const nth = (mm, n) => m === mm && w === 1 && Math.ceil(day / 7) === n;  // 第 n 月曜
+  const shun = Math.floor(20.8431 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+  const shu = Math.floor(23.2488 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+  const fixed = d2 => { const mm = d2.getMonth() + 1, dd = d2.getDate(), yy = d2.getFullYear(); const k = mm * 100 + dd;
+    const s = Math.floor(20.8431 + 0.242194 * (yy - 1980) - Math.floor((yy - 1980) / 4)), a = Math.floor(23.2488 + 0.242194 * (yy - 1980) - Math.floor((yy - 1980) / 4));
+    return [101, 211, 223, 429, 503, 504, 505, 811, 1103, 1123].includes(k) || k === 300 + s || k === 900 + a; };
+  if (fixed(d) || nth(1, 2) || nth(7, 3) || nth(9, 3) || nth(10, 2)) return true;
+  if (m === 3 && day === shun) return true;
+  // 振替休日：祝日が日曜なら、その後の最初の祝日でない日
+  if (w !== 0) { const p = new Date(d); p.setDate(day - 1); while (fixed(p)) { if (p.getDay() === 0) return true; p.setDate(p.getDate() - 1); } }
+  // 国民の休日：前後が祝日に挟まれた平日（敬老の日と秋分の日の間）
+  if (m === 9 && w === 2 && day + 1 === shu && Math.ceil((day - 1) / 7) === 3) return true;
+  return false;
+}
+const isBusiness = d => d.getDay() !== 0 && d.getDay() !== 6 && !isHoliday(d);
+function nextBusiness(d) { const x = new Date(d); while (!isBusiness(x)) x.setDate(x.getDate() + 1); return x; }
+function lastWeekday(y, m) { const x = new Date(y, m + 1, 0); while (!isBusiness(x)) x.setDate(x.getDate() - 1); return x; }
+// その月（y 年 m 月、0 始まり）の引き落とし日と、対象の利用期間
+function debitOf(rule, y, m) {
+  if (rule.lastWeekday) return { date: lastWeekday(y, m), span: '' };
+  const md = x => (x.getMonth() + 1) + '/' + x.getDate();
+  const end = rule.close ? new Date(y, m - 1, rule.close) : new Date(y, m, 0);
+  const start = rule.close ? new Date(y, m - 2, rule.close + 1) : new Date(y, m - 1, 1);
+  return { date: nextBusiness(new Date(y, m, rule.day)), span: md(start) + '〜' + md(end) + 'の利用分' };
+}
+// 今日以降の引き落とし2回分
+function upcoming(rule, today) {
+  const t = iso(today), out = [];
+  for (let i = -1; out.length < 2 && i < 4; i++) { const x = debitOf(rule, today.getFullYear(), today.getMonth() + i); if (iso(x.date) >= t) out.push(x); }
+  return out;
+}
+function payBox(accounts) {
+  const rules = PAY_RULES.filter(r => r.accounts.some(a => accounts.includes(a)));
+  if (!rules.length) return [];
+  const wd = x => (x.getMonth() + 1) + '/' + x.getDate() + '（' + '日月火水木金土'[x.getDay()] + '）';
+  return [el('h2', '引き落とし日'), ...rules.map(r => el('small', r.name + '：' + upcoming(r, new Date()).map(x => wd(x.date) + (x.span ? '（' + x.span + '）' : '')).join('、')))];
 }
 
 // 自分の月の予算。空なら「決めない」。保存はその場で

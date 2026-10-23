@@ -182,6 +182,8 @@ function needLogin() {
   token = null;
   disk.clear();
   renderCost(null);
+  // 前にログインした URL（期限なし）を覚えていれば、それで PIN の画面を出す（K062）
+  if (!params.m) { try { const saved = JSON.parse(localStorage.getItem('kakeibo_login') || 'null'); if (saved && saved.m) params = saved; } catch (e) {} }
   if (params.m) show('login');
   else { show(''); $('msg').textContent = 'メールで届いたログインURLから開いてください。'; }
 }
@@ -265,7 +267,7 @@ async function start() {
     costAt = Date.now();
     applyBoot(b);
     if (!last) show('post');
-    // ログインURL（7日で切れる）をアドレス欄から消す。ホーム画面に追加しても、ログイン済みの URL だけが残る
+    // ログインURLをアドレス欄から消す（画面に残さない）。URL は端末に覚えているので、次に切れても PIN だけで入れる（K062）
     if (params.m) history.replaceState(null, '', location.pathname);
   } catch (e) {
     if (isAuth(e)) return needLogin();
@@ -283,6 +285,7 @@ $('loginView').onsubmit = async ev => {
   try {
     token = await run('login', params.m, params.e, params.s, $('pin').value);
     disk.set('token', token);
+    if (String(params.e) === '0') { try { localStorage.setItem('kakeibo_login', JSON.stringify({ m: params.m, e: params.e, s: params.s })); } catch (e) {} }
     $('loginBtn').textContent = 'ログインしました。開いています…';
     await start();
   } catch (e) {
@@ -487,57 +490,14 @@ function renderHome(data) {
     ...rows('カテゴリ別', sumBy(rs.flatMap(r => r.items), 'category', 'amount')),
     ...rows('だれのため別', sumBy(rs, 'for_whom', 'total')),
     ...(rs.some(r => r.account) ? rows('支払元別', sumBy(rs.map(r => Object.assign({}, r, { account: r.account || '現金・その他' })), 'account', 'total')) : []),
-    ...payBox((disk.get('boot') || {}).accounts || []));
+    ...payBox(data.debits));
 }
 
-// ---------- 引き落とし日（K061）。支払元ごとの締め日と引き落とし日。休日（土日・祝日・年末年始）は翌営業日 ----------
-// dカード：15日締め・翌月10日（CSV の実際の引き落とし日 2026/1/13・5/11・10/13 と一致）。楽天カード：月末締め・翌月27日。UFJ：毎月最後の平日（渡邊の指定）
-const PAY_RULES = [
-  { name: 'dカード（d払いを含む）', accounts: ['dカード', 'd払い'], close: 15, day: 10 },
-  { name: '楽天カード（楽天ペイを含む）', accounts: ['楽天Visa', '楽天JCB', '楽天ペイ'], close: 0, day: 27 },
-  { name: 'UFJ（口座）', accounts: ['UFJ'], lastWeekday: true },
-];
-const iso = d => d.toLocaleDateString('sv');
-// 日本の祝日（内閣府の決まりを計算で。春分・秋分は 1980〜2099 年の近似式）
-function isHoliday(d) {
-  const y = d.getFullYear(), m = d.getMonth() + 1, day = d.getDate(), w = d.getDay();
-  if ((m === 12 && day === 31) || (m === 1 && day <= 3)) return true;  // 銀行の年末年始
-  const nth = (mm, n) => m === mm && w === 1 && Math.ceil(day / 7) === n;  // 第 n 月曜
-  const shun = Math.floor(20.8431 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
-  const shu = Math.floor(23.2488 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
-  const fixed = d2 => { const mm = d2.getMonth() + 1, dd = d2.getDate(), yy = d2.getFullYear(); const k = mm * 100 + dd;
-    const s = Math.floor(20.8431 + 0.242194 * (yy - 1980) - Math.floor((yy - 1980) / 4)), a = Math.floor(23.2488 + 0.242194 * (yy - 1980) - Math.floor((yy - 1980) / 4));
-    return [101, 211, 223, 429, 503, 504, 505, 811, 1103, 1123].includes(k) || k === 300 + s || k === 900 + a; };
-  if (fixed(d) || nth(1, 2) || nth(7, 3) || nth(9, 3) || nth(10, 2)) return true;
-  if (m === 3 && day === shun) return true;
-  // 振替休日：祝日が日曜なら、その後の最初の祝日でない日
-  if (w !== 0) { const p = new Date(d); p.setDate(day - 1); while (fixed(p)) { if (p.getDay() === 0) return true; p.setDate(p.getDate() - 1); } }
-  // 国民の休日：前後が祝日に挟まれた平日（敬老の日と秋分の日の間）
-  if (m === 9 && w === 2 && day + 1 === shu && Math.ceil((day - 1) / 7) === 3) return true;
-  return false;
-}
-const isBusiness = d => d.getDay() !== 0 && d.getDay() !== 6 && !isHoliday(d);
-function nextBusiness(d) { const x = new Date(d); while (!isBusiness(x)) x.setDate(x.getDate() + 1); return x; }
-function lastWeekday(y, m) { const x = new Date(y, m + 1, 0); while (!isBusiness(x)) x.setDate(x.getDate() - 1); return x; }
-// その月（y 年 m 月、0 始まり）の引き落とし日と、対象の利用期間
-function debitOf(rule, y, m) {
-  if (rule.lastWeekday) return { date: lastWeekday(y, m), span: '' };
-  const md = x => (x.getMonth() + 1) + '/' + x.getDate();
-  const end = rule.close ? new Date(y, m - 1, rule.close) : new Date(y, m, 0);
-  const start = rule.close ? new Date(y, m - 2, rule.close + 1) : new Date(y, m - 1, 1);
-  return { date: nextBusiness(new Date(y, m, rule.day)), span: md(start) + '〜' + md(end) + 'の利用分' };
-}
-// 今日以降の引き落とし2回分
-function upcoming(rule, today) {
-  const t = iso(today), out = [];
-  for (let i = -1; out.length < 2 && i < 4; i++) { const x = debitOf(rule, today.getFullYear(), today.getMonth() + i); if (iso(x.date) >= t) out.push(x); }
-  return out;
-}
-function payBox(accounts) {
-  const rules = PAY_RULES.filter(r => r.accounts.some(a => accounts.includes(a)));
-  if (!rules.length) return [];
-  const wd = x => (x.getMonth() + 1) + '/' + x.getDate() + '（' + '日月火水木金土'[x.getDay()] + '）';
-  return [el('h2', '引き落とし日'), ...rules.map(r => el('small', r.name + '：' + upcoming(r, new Date()).map(x => wd(x.date) + (x.span ? '（' + x.span + '）' : '')).join('、')))];
+// ---------- 引き落とし日（K061・K062）。計算はサーバー（debitDate_／upcomingDebits_）。画面は出すだけ ----------
+function payBox(debits) {
+  if (!debits || !debits.length) return [];
+  const wd = s => { const x = new Date(s + 'T00:00:00'); return (x.getMonth() + 1) + '/' + x.getDate() + '（' + '日月火水木金土'[x.getDay()] + '）'; };
+  return [el('h2', '引き落とし日（見込み額）'), ...debits.map(r => el('small', r.name + '：' + r.next.map(x => wd(x.date) + ' ' + yen(x.total) + (x.span ? '（' + x.span + '）' : '')).join('、')))];
 }
 
 // 自分の月の予算。空なら「決めない」。保存はその場で
@@ -607,7 +567,7 @@ function detail(r) {
   d.open = openIds.has(r.receipt_id);  // 作り直しても開いたまま
   d.ontoggle = () => { if (d.open) openIds.add(r.receipt_id); else openIds.delete(r.receipt_id); };
   d.append(el('summary', r.date.slice(5) + '　' + title(r)));
-  d.append(el('small', r.receipt_id + '　だれのため：' + r.for_whom + (r.account ? '　支払元：' + r.account : '') + (r.memo ? '　メモ：' + r.memo : '')), ...itemLines(r));
+  d.append(el('small', r.receipt_id + '　だれのため：' + r.for_whom + (r.account ? '　支払元：' + r.account : '') + (r.debit_date ? '　引き落とし：' + r.debit_date.slice(5).replace('-', '/') : '') + (r.memo ? '　メモ：' + r.memo : '')), ...itemLines(r));
   if (r.has_image) {
     const b = el('button', 'レシートの画像を見る');
     b.type = 'button';

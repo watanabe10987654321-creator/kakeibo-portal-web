@@ -71,6 +71,7 @@
   .helpBox .close { margin-top: 16px; background: #eee; color: #222; }
   .hint { font-size: 13px; color: #666; margin-top: 8px; }
   .hint button { width: auto; margin: 0 0 0 6px; padding: 2px 8px; font-size: 13px; background: #eee; color: #222; border-radius: 10px; }
+  textarea { font-size: 16px; width: 100%; box-sizing: border-box; padding: 10px; margin-top: 4px; font-family: inherit; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -153,7 +154,7 @@
       <ul>
         <li>明るい場所で、真上から、レシート全体が入るように撮る</li>
         <li>1枚の写真に1枚のレシート。複数写っていると要確認になる</li>
-        <li>同じレシートを2回送っても、同じ店・日付・合計なら2回目は数えない</li>
+        <li>同じ写真を2回送っても、2回目は記録しない。撮り直した写真でも、同じ日付・合計・品目なら2回目は数えない</li>
       </ul>
     </section>
     <section data-tab="home">
@@ -187,8 +188,14 @@
         <li><b>間違って送った</b>：明細でその行を開き「このレシートを削除」</li>
         <li><b>写真が送れない</b>：電波の弱い場所では失敗することがある。送れなかった写真は赤い枠で残るので、もう一度「送る」</li>
         <li><b>金額や店が違う</b>：明細で「直す」。直した内容は記録に残る</li>
-        <li>それ以外は管理者（渡邊）へ。画面の表示と、できれば受付番号（R-…）を伝えると早い</li>
+        <li>自分で直せないときは、下の欄から管理者（渡邊）に頼む</li>
       </ul>
+      <h2>管理者に修正・改善を頼む</h2>
+      <p>読み取りの間違いが自分で直せない、使いにくい、こうしてほしい、を書いて送る。管理者にメールで届く。明細の「この記録について管理者に頼む」から開くと、どの記録かも一緒に届く。</p>
+      <div id="reqTarget" class="hint" hidden></div>
+      <textarea id="reqText" maxlength="1000" rows="4" placeholder="例：合計が 0円になっている／日付が違うのに直せない"></textarea>
+      <button type="button" id="reqSend">依頼を送る</button>
+      <div id="reqMsg" class="hint"></div>
     </section>
     <section data-tab="admin">
       <h2>管理者だけの機能</h2>
@@ -196,7 +203,8 @@
         <li><b>明細のスクショ</b>：種別「明細のスクショ」で、カード会社や決済アプリの利用明細の画面を送る。写っている取引が1件ずつ入る。dカードは「いつの支払い分か」を選ぶと、その期間の行だけ入る</li>
         <li><b>収入</b>：種別「収入」で入金の画面を送る</li>
         <li><b>dカードの CSV</b>：画面の下の CSV 欄から。先に件数を確かめてから取り込む。何度入れても重ならない</li>
-        <li><b>支払元</b>：記録に付けると、支払元別の集計と引き落とし日が出る。前回の選択を端末が覚える</li>
+        <li><b>支払元</b>：「おまかせ」のままなら、レシートに印字された支払い方法（d払い・iD など）を AI が読んで付ける。違っていたら明細の「直す」で付け直す。支払元別の集計と引き落とし日に使う</li>
+        <li><b>ポイント払い</b>：ポイントやクーポン券で払った分も、買い物の額として数える。メモに「ポイント等 ◯円 利用」と残り、カードとの照合は差し引いた額で行う</li>
         <li>運用コスト（AI）の欄は、今月の AI 利用料と上限。上限に達すると読み取りが止まり、手入力になる</li>
       </ul>
     </section>
@@ -343,7 +351,8 @@ function applyBoot(b) {
   [...$('kind').options].forEach(o => { if (o.value === 'statement' || o.value === 'income') o.hidden = b.role !== 'admin'; });
   $('accountRow').hidden = !(b.accounts && b.accounts.length);
   // 支払元は前回選んだものにそろえる（端末に覚える。K050）
-  if (b.accounts) { const keep = $('account').value || disk.get('account') || ''; $('account').replaceChildren(new Option('現金・その他', ''), ...b.accounts.map(a => new Option(a, a))); $('account').value = b.accounts.indexOf(keep) >= 0 ? keep : ''; }
+  // 支払元は「おまかせ」が既定（レシートに印字された支払い方法を AI が読む。K066）。前回の選択は引き継がない（違う支払元が付く原因だった）。選んでいる途中の値は消さない
+  if (b.accounts) { const keep = $('account').value; $('account').replaceChildren(new Option('おまかせ（レシートから読む。無ければ現金・その他）', ''), ...b.accounts.map(a => new Option(a, a))); $('account').value = b.accounts.indexOf(keep) >= 0 ? keep : ''; }
   if (b.periods) $('periodYm').replaceChildren(...b.periods.map(p => new Option(p.label, p.ym)));
   togglePeriod();
   $('csvRow').hidden = !(b.accounts && b.accounts.indexOf('dカード') >= 0);
@@ -429,7 +438,7 @@ async function shrink(file) {
 const needsCheck = r => r.status === 'needs_review' || r.status === 'needs_input';
 // 読み取り中は店名も金額もまだ無いので出さない
 const KIND = { income: '【収入】', matched: '【数えていない】', statement: '【明細】', expense: '' };
-const title = r => (KIND[r.kind] || '') + FLAG[r.status] + (r.status === 'processing' ? (r.total == null ? '' : yen(r.total)) : (r.store || '店名不明') + '　' + yen(r.total));
+const title = r => (KIND[r.kind] || '') + FLAG[r.status] + (r.status === 'processing' ? (r.total == null ? '' : yen(r.total)) : (r.store || r.memo || '店名不明') + '　' + yen(r.total));  // 手入力は店名が無いのでメモを見出しにする
 const FLAG = { ok: '', needs_review: '【要確認】', needs_input: '【手入力が必要】', processing: '【読み取り中】' };
 
 function itemLines(r) {
@@ -538,7 +547,7 @@ function stageCard(s) {
     const v = s.own || sharedValues();
     const parts = [];
     if (v.kind === 'statement') parts.push('明細のスクショ'); else if (v.kind === 'income') parts.push('収入');
-    if (!$('accountRow').hidden) parts.push(v.account || '現金・その他');
+    if (!$('accountRow').hidden) parts.push(v.account || '支払元おまかせ');
     parts.push(v.for_whom === 'その他' ? (v.for_whom_other || 'その他') : v.for_whom);
     if (v.memo) parts.push('メモ：' + v.memo);
     summary.textContent = (s.own ? 'この写真だけ：' : '共通の設定：') + parts.join('・');
@@ -557,7 +566,7 @@ function stageCard(s) {
     const memo = el('input'); memo.maxLength = 200; memo.placeholder = 'この写真のメモ'; memo.value = s.own.memo;
     memo.oninput = () => { s.own.memo = memo.value; describe(); };
     mini.replaceChildren(field('種別', sel(kindOpts, s.own.kind, 'kind')));
-    if (!$('accountRow').hidden) mini.append(field('支払元', sel([['現金・その他', '']].concat((b.accounts || []).map(a => [a, a])), s.own.account, 'account')));
+    if (!$('accountRow').hidden) mini.append(field('支払元', sel([['おまかせ（レシートから読む）', '']].concat((b.accounts || []).map(a => [a, a])), s.own.account, 'account')));
     const whomLabel = field('だれのため', whom); whomLabel.append(otherBox);
     mini.append(whomLabel, field('メモ', memo, true));
     mini.hidden = false;
@@ -619,13 +628,10 @@ $('postView').onsubmit = ev => {
     $('results').prepend(slot);
     return { f: p ? p.file : null, slot, request_id: newId(), fields: fields[i] };
   });
-  disk.set('account', shared.account);
-  const keepAccount = shared.account;
   // 入力欄はすぐ空に戻す。続けて次のレシートを送れる
   staged.length = 0;
   $('staged').replaceChildren();
   $('postView').reset();
-  $('account').value = keepAccount;  // 支払元は次の投稿にも引き継ぐ
   togglePeriod();
   $('forWhomOther').hidden = true;
   refreshStage();
@@ -636,6 +642,13 @@ $('postView').onsubmit = ev => {
       const j = jobs.shift();
       try {
         const r = await run('postReceipt', token, Object.assign({ request_id: j.request_id }, j.fields, j.f ? { image: await shrink(j.f) } : {}));
+        if (r.duplicate) {  // 同じ写真の再送（K066）
+          const dup = card(r);
+          dup.append(el('small', '同じ写真がもう送られているので、新しくは記録していません'));
+          j.slot.replaceWith(dup);
+          uploading--;
+          continue;
+        }
         const c = card(r);
         if (r.status === 'processing') c.append(el('small', '受け付けました。AI の読み取りは裏で進みます。結果はメールと明細に届きます（画面は閉じても大丈夫）'));
         j.slot.replaceWith(c);
@@ -667,6 +680,34 @@ function openHelp(tab) {
 }
 $('help').addEventListener('click', ev => { const t = ev.target.dataset && ev.target.dataset.tab; if (t) openHelp(t); else if (ev.target === $('help')) $('help').close(); });
 $('helpClose').onclick = () => $('help').close();
+// 管理者への依頼（K066）。明細から開いたときは、どの記録かも送る
+let reqReceipt = '';
+function openRequest(receiptId) {
+  reqReceipt = receiptId || '';
+  $('reqTarget').hidden = !reqReceipt;
+  $('reqTarget').textContent = reqReceipt ? '対象の記録：' + reqReceipt : '';
+  $('reqMsg').textContent = '';
+  openHelp('trouble');
+  $('reqText').focus();
+}
+$('reqSend').onclick = async () => {
+  const text = $('reqText').value.trim();
+  if (!text) { $('reqMsg').textContent = '依頼の内容を入れてください。'; return; }
+  $('reqSend').disabled = true;
+  $('reqMsg').textContent = '送っています…';
+  try {
+    await run('postRequest', token, { text: text, receipt_id: reqReceipt });
+    $('reqMsg').textContent = '送りました。管理者に届きます。';
+    $('reqText').value = '';
+    reqReceipt = '';
+    $('reqTarget').hidden = true;
+  } catch (e) {
+    if (isAuth(e)) { $('help').close(); return needLogin(); }
+    $('reqMsg').textContent = '送れませんでした：' + e.message;
+  } finally {
+    $('reqSend').disabled = false;
+  }
+};
 $('helpBtn').onclick = () => openHelp();
 $('monthHelp').onclick = () => openHelp();
 document.addEventListener('click', ev => { const h = ev.target.dataset && ev.target.dataset.help; if (h) openHelp(h); });
@@ -829,7 +870,10 @@ function detail(r) {
   del.type = 'button';
   del.style.color = '#c00';
   del.onclick = () => { if (confirm((r.store || 'このレシート') + ' ' + yen(r.total) + ' を削除しますか？')) applyEdit(r, { receipt_id: r.receipt_id, deleted: true }); };
-  d.append(e, del);
+  const ask = el('button', 'この記録について管理者に頼む');
+  ask.type = 'button';
+  ask.onclick = () => openRequest(r.receipt_id);
+  d.append(e, del, ask);
   return d;
 }
 

@@ -839,7 +839,7 @@ async function applyEdit(r, patch) {
   const old = m.receipts.slice();
   const guess = patch.deleted ? null : Object.assign({}, r, {
     store: patch.store, date: patch.date, total: patch.total === '' ? null : Number(patch.total), for_whom: patch.for_whom === 'その他' ? patch.for_whom_other : patch.for_whom,
-    memo: patch.memo, status: 'ok', kind: patch.count && r.kind === 'matched' ? 'expense' : r.kind, items: patch.items.filter(it => !it.deleted).map(it => ({ name: it.name, amount: Number(it.amount), category: it.category, for_whom: r.for_whom })),
+    memo: patch.memo, account: patch.account == null ? r.account : patch.account, status: 'ok', kind: patch.count && r.kind === 'matched' ? 'expense' : r.kind, items: patch.items.filter(it => !it.deleted).map(it => ({ name: it.name, amount: Number(it.amount), category: it.category, for_whom: r.for_whom })),
   });
   const moved = guess && ymOf(guess.date) !== ym;
   m.receipts = guess && !moved ? m.receipts.map(x => (x.receipt_id === r.receipt_id ? guess : x)) : m.receipts.filter(x => x.receipt_id !== r.receipt_id);
@@ -882,9 +882,12 @@ function editForm(r, onClose) {
   whomOther.hidden = whom.value !== 'その他';
   whom.onchange = () => { whomOther.hidden = whom.value !== 'その他'; };
   const memo = el('input'); memo.value = r.memo; memo.maxLength = 200;
+  // 支払元の付け直し（選択肢がある人だけ＝admin。K065）
+  const acc = b.accounts && b.accounts.length ? el('select') : null;
+  if (acc) { acc.replaceChildren(new Option('現金・その他', ''), ...b.accounts.map(a => new Option(a, a))); acc.value = r.account || ''; }
   const countBox = el('input'); countBox.type = 'checkbox';
   const countLabel = el('label', ' 別の買い物として数える（重複ではない）'); countLabel.prepend(countBox); countLabel.hidden = r.kind !== 'matched';
-  f.append(field('店名', store), field('日付', date), field('合計', total), field('だれのため', whom), whomOther, field('メモ', memo), countLabel, el('h2', '品目'));
+  f.append(field('店名', store), field('日付', date), field('合計', total), ...(acc ? [field('支払元', acc)] : []), field('だれのため', whom), whomOther, field('メモ', memo), countLabel, el('h2', '品目'));
 
   const items = el('div');
   const itemRow = it => {
@@ -910,7 +913,7 @@ function editForm(r, onClose) {
   const apply = patch => applyEdit(r, patch);
   f.onsubmit = ev => {
     ev.preventDefault();
-    apply({ receipt_id: r.receipt_id, store: store.value, date: date.value, total: total.value, for_whom: whom.value, for_whom_other: whomOther.value, memo: memo.value, count: countBox.checked,
+    apply({ receipt_id: r.receipt_id, store: store.value, date: date.value, total: total.value, for_whom: whom.value, for_whom_other: whomOther.value, memo: memo.value, account: acc ? acc.value : null, count: countBox.checked,
       items: [...items.children].map(row => row.read()) });
   };
   remove.onclick = () => { if (confirm('このレシートを削除しますか？')) apply({ receipt_id: r.receipt_id, deleted: true }); };
